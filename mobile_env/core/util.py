@@ -3,6 +3,7 @@ from typing import Dict
 import matplotlib
 import svgpath2mpl
 
+# 这段字符串表示一个 SVG 图形的路径数据。它定义了一个基站的图标形状
 BS_SYMBOL = (
     "M31.5,19c0-4.1-3.4-7.5-7.5-7.5s-7.5,3.4-7.5,7.5c0,2.9,1.6,5.4,4,"
     "6.7l0.9-1.8c-1.7-0.9-2.9-2.8-2.9-4.9c0-3,2.5-5.5,5.5-5.5s5.5,2.5,"
@@ -22,14 +23,16 @@ BS_SYMBOL = (
 )
 
 BS_SYMBOL = svgpath2mpl.parse_path(BS_SYMBOL)
+# 该方法将 SVG 路径字符串转换为 Matplotlib 的路径对象
 BS_SYMBOL.vertices -= BS_SYMBOL.vertices.mean(axis=0)
 # rotate (otherwise up side down): https://stackoverflow.com/a/48231144/2745116
+# 居中对齐
 transform = matplotlib.transforms.Affine2D().rotate_deg(180)
 BS_SYMBOL = BS_SYMBOL.transformed(transform)
 
 
+# 用于 递归地合并两个字典，在合并时会保留嵌套结构中的值
 def deep_dict_merge(dest: Dict, source: Dict):
-    """Merge dictionaries recursively (i.e. deep merge)."""
     for key, value in source.items():
         if isinstance(value, dict):
             # get node or create one
