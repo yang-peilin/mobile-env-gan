@@ -2,7 +2,7 @@ from abc import abstractmethod
 
 import numpy as np
 
-from my_env_gan.core.entities import UserEquipment
+from mobile_env.core.entities import UserEquipment
 
 
 class Arrival:

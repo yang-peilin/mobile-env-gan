@@ -1,1 +1,10 @@
 --editable .
+
+setuptools~=75.1.0
+matplotlib~=3.9.2
+numpy~=2.0.1
+pygame~=2.6.1
+svgpath2mpl~=1.0.0
+pandas~=2.2.3
+shapely~=2.0.6
+ipython~=8.29.0

@@ -3,7 +3,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-from my_env_gan.core.entities import BaseStation, UserEquipment
+from mobile_env.core.entities import BaseStation, UserEquipment
 
 EPSILON = 1e-16
 

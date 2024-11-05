@@ -1,28 +1,24 @@
 import string
-import time
 from collections import Counter, defaultdict
 from typing import Dict, List, Set, Tuple
 
-import gymnasium
 import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import pygame
 from matplotlib import cm
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from pygame import Surface
 
-from my_env_gan.core import metrics
-# from mobile_env_gan.core import metrics
-from my_env_gan.core.arrival import NoDeparture
-from my_env_gan.core.channels import OkumuraHata
-from my_env_gan.core.entities import BaseStation, UserEquipment
-from my_env_gan.core.logging import Monitor
-from my_env_gan.core.movement import RandomWaypointMovement
-from my_env_gan.core.schedules import ResourceFair
-from my_env_gan.core.util import BS_SYMBOL, deep_dict_merge
-from my_env_gan.core.utilities import BoundedLogUtility
+from mobile_env.core import metrics
+from mobile_env.core.arrival import NoDeparture
+from mobile_env.core.channels import OkumuraHata
+from mobile_env.core.entities import BaseStation, UserEquipment
+from mobile_env.core.logging import Monitor
+from mobile_env.core.movement import RandomWaypointMovement
+from mobile_env.core.schedules import ResourceFair
+from mobile_env.core.util import BS_SYMBOL, deep_dict_merge
+from mobile_env.core.utilities import BoundedLogUtility
 
 
 class MComCore:
@@ -387,62 +383,6 @@ class MComCore:
             self.all_step_datarates[ue_id].append(datarate)
             self.all_step_utilities[ue_id].append(utility)
 
-    # def save_results_to_file(self, datarate_filename="datarates_results.csv", utility_filename="utilities_results.csv"):
-    #     """将所有用户的特征数据保存到 CSV 文件中"""
-    #
-    #     # 处理数据速率结果
-    #     datarate_records = []
-    #     for ue_id, datarates in self.all_step_datarates.items():
-    #         datarate_record = {"UE ID": ue_id}
-    #         for time_step, datarate in enumerate(datarates):
-    #             datarate_record[f"Step {time_step + 1}"] = datarate
-    #         datarate_records.append(datarate_record)
-    #
-    #     # 转换为 DataFrame 并保存到 CSV 文件中
-    #     datarate_df = pd.DataFrame(datarate_records)
-    #     datarate_df.to_csv(datarate_filename, index=False)
-    #
-    #     # 处理效用值结果
-    #     utility_records = []
-    #     for ue_id, utilities in self.all_step_utilities.items():
-    #         utility_record = {"UE ID": ue_id}
-    #         for time_step, utility in enumerate(utilities):
-    #             utility_record[f"Step {time_step + 1}"] = utility
-    #         utility_records.append(utility_record)
-    #
-    #     # 转换为 DataFrame 并保存到 CSV 文件中
-    #     utility_df = pd.DataFrame(utility_records)
-    #     utility_df.to_csv(utility_filename, index=False)
-
-    def save_results_to_file(self, datarate_filename="datarates_results.csv", utility_filename="utilities_results.csv"):
-
-        # 确定所有用户的最大步数
-        max_steps = max(len(datarates) for datarates in self.all_step_datarates.values())
-
-        # 处理数据速率结果
-        datarate_records = {"UE ID": list(self.all_step_datarates.keys())}
-        for step in range(max_steps):
-            datarate_records[f"Step {step + 1}"] = [
-                datarates[step] if step < len(datarates) else None
-                for datarates in self.all_step_datarates.values()
-            ]
-
-        # 转换为 DataFrame 并保存到 CSV 文件中
-        datarate_df = pd.DataFrame(datarate_records)
-        datarate_df.to_csv(datarate_filename, index=False)
-
-        # 处理效用值结果
-        utility_records = {"UE ID": list(self.all_step_utilities.keys())}
-        for step in range(max_steps):
-            utility_records[f"Step {step + 1}"] = [
-                utilities[step] if step < len(utilities) else None
-                for utilities in self.all_step_utilities.values()
-            ]
-
-        # 转换为 DataFrame 并保存到 CSV 文件中
-        utility_df = pd.DataFrame(utility_records)
-        utility_df.to_csv(utility_filename, index=False)
-
     # 判断当前时间是否已经达到了最小的结束时间
     @property
     def time_is_up(self):
@@ -458,8 +398,11 @@ class MComCore:
 
     # 计算每个用户设备最终能接收到的下行数据速率
     def station_allocation(self, bs) -> Dict:
-        # 获取与基站bs建立连接的用户设备集合
-        conns = self.connections[bs]
+        # 获取与基站 bs 建立连接的用户集合
+        if bs in self.connections:
+            conns = self.connections[bs]
+        else:
+            conns = set()  # 如果基站不在 connections 中，使用空集合
 
         # 计算每个用户设备的SNR和最大数据速率
         snrs = [self.channel.snr(bs, ue) for ue in conns]
@@ -570,32 +513,6 @@ class MComCore:
                 "datarate": datarate,  # 添加数据速率到特征中
             }
 
-        # # 为那些当前不活跃的用户设备创建一组标准化的特征数据
-        # def dummy_features(ue):
-        #     onehot = np.zeros(self.NUM_STATIONS, dtype=np.float32)
-        #     snrs = np.zeros(self.NUM_STATIONS, dtype=np.float32)
-        #     utility = np.asarray(
-        #         [self.utility.scale(self.utility.lower)], dtype=np.float32
-        #     )
-        #     idle = self.utility.scale(self.utility.lower)
-        #     util_bcast = idle * np.ones(self.NUM_STATIONS, dtype=np.float32)
-        #     num_connected = np.ones(self.NUM_STATIONS, dtype=np.float32)
-        #     datarate = np.asarray([0.0], dtype=np.float32)
-        #
-        #     return {
-        #         "connections": onehot,
-        #         "snrs": snrs,
-        #         "utility": utility,
-        #         "bcast": util_bcast,
-        #         "stations_connected": num_connected,
-        #         "datarate": datarate,  # 确保包含 "datarate" 键
-        #     }
-
-        # idle_ues：计算出非活跃的用户设备，即那些当前不请求服务的用户设备
-        # idle_ues = set(self.users.values()) - set(self.active)
-        # # obs：为每个非活跃用户设备生成虚拟特征
-        # obs = {ue.ue_id: dummy_features(ue) for ue in idle_ues}
-
         # obs字典现在包含了所有用户设备的特征，无论它们是活跃还是非活跃
         obs = {ue.ue_id: ue_features(ue) for ue in self.users.values()}
 
@@ -623,6 +540,7 @@ class MComCore:
         # 计算基站的连接范围等值线，即用户设备可以连接到基站的区域边界（基于信号强度）
         if self.conn_isolines is None:
             self.conn_isolines = self.bs_isolines(0.0)
+
         # 计算基站的1MB / s数据速率等值线，即用户设备可以接收到至少1MB / s数据速率的区域边界
         if self.mb_isolines is None:
             self.mb_isolines = self.bs_isolines(1.0)
@@ -721,6 +639,7 @@ class MComCore:
         else:
             raise ValueError("Invalid rendering mode.")
 
+
     # 展示用户设备的效用值、基站的连接范围、数据速率等信息
     def render_simulation(self, ax) -> None:
         # colormap：使用matplotlib的颜色映射（RdYlGn），用于将效用值（QoE）映射为不同颜色
@@ -767,6 +686,10 @@ class MComCore:
             )
 
             # 在图表上绘制基站连接范围的等值线
+            # pdb.set_trace()
+            # print("*self.conn_isolines[bs]: ", *self.conn_isolines[bs])
+            print(f"bs: {bs}, type(bs): {type(bs)}")
+
             ax.scatter(*self.conn_isolines[bs], color="gray", s=3)
             # 在图表上绘制基站的1MB / s数据速率等值线
             ax.scatter(*self.mb_isolines[bs], color="black", s=3)

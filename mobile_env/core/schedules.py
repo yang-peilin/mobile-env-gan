@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from typing import List
 
-from my_env_gan.core.entities import BaseStation
+from mobile_env.core.entities import BaseStation
 
 
 # 据速率资源分配给连接的用户设备
