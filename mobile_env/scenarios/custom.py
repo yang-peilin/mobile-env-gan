@@ -47,6 +47,8 @@ class MComCustom(MComCore):
         self.stations = generate_base_stations(env_config)
         self.stations = {bs.bs_id: bs for bs in self.stations}
 
+    import pandas as pd
+
     def save_results_to_file(self, datarate_filename="datarates_results.csv", utility_filename="utilities_results.csv"):
 
         # 确定所有用户的最大步数
@@ -62,6 +64,8 @@ class MComCustom(MComCore):
 
         # 转换为 DataFrame 并保存到 CSV 文件中
         datarate_df = pd.DataFrame(datarate_records)
+        # 打印数据速率结果的行数和列数
+        print(f"Datarate DataFrame: {datarate_df.shape[0]} rows, {datarate_df.shape[1]} columns")
         datarate_df.to_csv(datarate_filename, index=False)
 
         # 处理效用值结果
@@ -74,4 +78,6 @@ class MComCustom(MComCore):
 
         # 转换为 DataFrame 并保存到 CSV 文件中
         utility_df = pd.DataFrame(utility_records)
+        # 打印效用值结果的行数和列数
+        print(f"Utility DataFrame: {utility_df.shape[0]} rows, {utility_df.shape[1]} columns")
         utility_df.to_csv(utility_filename, index=False)

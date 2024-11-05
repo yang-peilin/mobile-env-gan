@@ -1,10 +1,12 @@
 import string
+import time
 from collections import Counter, defaultdict
 from typing import Dict, List, Set, Tuple
 
 import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import pygame
 from matplotlib import cm
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
@@ -383,6 +385,40 @@ class MComCore:
             self.all_step_datarates[ue_id].append(datarate)
             self.all_step_utilities[ue_id].append(utility)
 
+    # 在数据收集完成后调用此方法来查看数据的维度并保存为CSV
+    def save_all_step_data(self, idx):
+        # 计算并打印 all_step_datarates 的行数和列数
+        max_datarates_steps = max(len(datarates) for datarates in self.all_step_datarates.values())
+        print(f"all_step_datarates: {len(self.all_step_datarates)} rows, {max_datarates_steps} columns")
+
+        # 将 all_step_datarates 转换为 DataFrame 格式
+        datarate_records = {"UE ID": list(self.all_step_datarates.keys())}
+        for step in range(max_datarates_steps):
+            datarate_records[f"Step {step + 1}"] = [
+                datarates[step] if step < len(datarates) else None
+                for datarates in self.all_step_datarates.values()
+            ]
+        datarate_df = pd.DataFrame(datarate_records)
+        # 保存到 CSV 文件，文件名包含 idx
+        datarate_df.to_csv(f"all_step_datarates_{idx}.csv", index=False)
+
+        # 计算并打印 all_step_utilities 的行数和列数
+        max_utilities_steps = max(len(utilities) for utilities in self.all_step_utilities.values())
+        print(f"all_step_utilities: {len(self.all_step_utilities)} rows, {max_utilities_steps} columns")
+
+        # 将 all_step_utilities 转换为 DataFrame 格式
+        utility_records = {"UE ID": list(self.all_step_utilities.keys())}
+        for step in range(max_utilities_steps):
+            utility_records[f"Step {step + 1}"] = [
+                utilities[step] if step < len(utilities) else None
+                for utilities in self.all_step_utilities.values()
+            ]
+        utility_df = pd.DataFrame(utility_records)
+        # 保存到 CSV 文件，文件名包含 idx
+        utility_df.to_csv(f"all_step_utilities_{idx}.csv", index=False)
+
+        print(f"数据保存完成：all_step_datarates_{idx}.csv 和 all_step_utilities_{idx}.csv")
+
     # 判断当前时间是否已经达到了最小的结束时间
     @property
     def time_is_up(self):
@@ -516,14 +552,6 @@ class MComCore:
         # obs字典现在包含了所有用户设备的特征，无论它们是活跃还是非活跃
         obs = {ue.ue_id: ue_features(ue) for ue in self.users.values()}
 
-        # 在全局变量中记录每个时间步的数据速率和效用值
-        self.all_step_datarates[self.time] = {
-            ue.ue_id: obs[ue.ue_id]["datarate"][0] for ue in self.active
-        }
-        self.all_step_utilities[self.time] = {
-            ue.ue_id: obs[ue.ue_id]["utility"][0] for ue in self.active
-        }
-
         return obs
 
     # 计算基站等值线。
@@ -553,13 +581,13 @@ class MComCore:
         fig = plt.figure(figsize=(fx, fy))
         # 创建子图布局
         gs = fig.add_gridspec(
-            ncols=2,                    # 指定图表有两列
-            nrows=3,                    # 指定图表有三行
-            width_ratios=(4, 2),        # 指定每列的宽度比例 (4, 2) 意味着第一列的宽度是第二列的两倍
-            height_ratios=(2, 3, 3),    # 指定每行的高度比例 (2, 3, 3) 意味着第一行的高度较小，而第二行和第三行的高度相等
-            hspace=0.45,                # 控制子图之间的垂直间距（行间距），以图形高度的比例表示
-            wspace=0.2,                 # wspace：控制子图之间的水平间距（列间距），以图形宽度的比例表示
-            top=0.95,                   # top=0.95：设置子图区域距离图形顶部的相对位置
+            ncols=2,  # 指定图表有两列
+            nrows=3,  # 指定图表有三行
+            width_ratios=(4, 2),  # 指定每列的宽度比例 (4, 2) 意味着第一列的宽度是第二列的两倍
+            height_ratios=(2, 3, 3),  # 指定每行的高度比例 (2, 3, 3) 意味着第一行的高度较小，而第二行和第三行的高度相等
+            hspace=0.45,  # 控制子图之间的垂直间距（行间距），以图形高度的比例表示
+            wspace=0.2,  # wspace：控制子图之间的水平间距（列间距），以图形宽度的比例表示
+            top=0.95,  # top=0.95：设置子图区域距离图形顶部的相对位置
             bottom=0.15,
             left=0.025,
             right=0.955,
@@ -639,7 +667,6 @@ class MComCore:
         else:
             raise ValueError("Invalid rendering mode.")
 
-
     # 展示用户设备的效用值、基站的连接范围、数据速率等信息
     def render_simulation(self, ax) -> None:
         # colormap：使用matplotlib的颜色映射（RdYlGn），用于将效用值（QoE）映射为不同颜色
@@ -654,8 +681,8 @@ class MComCore:
 
             ax.scatter(
                 ue.point.x,
-                ue.point.y,     # 分别表示用户设备的位置的 x 坐标和 y 坐标
-                s=200,          # 设置散点的大小为 200
+                ue.point.y,  # 分别表示用户设备的位置的 x 坐标和 y 坐标
+                s=200,  # 设置散点的大小为 200
                 zorder=2,
                 color=color,
                 marker="o",
@@ -668,9 +695,9 @@ class MComCore:
             ax.plot(
                 bs.point.x,
                 bs.point.y,
-                marker=BS_SYMBOL,       # BS_SYMBOL：基站的图标
-                markersize=30,          # markersize=30 表示基站图标的大小
-                markeredgewidth=0.1,    # 设置标记边缘的宽度
+                marker=BS_SYMBOL,  # BS_SYMBOL：基站的图标
+                markersize=30,  # markersize=30 表示基站图标的大小
+                markeredgewidth=0.1,  # 设置标记边缘的宽度
                 color="black",
             )
             # 将基站（BaseStation）的ID转换为对应的大写字母
@@ -688,7 +715,7 @@ class MComCore:
             # 在图表上绘制基站连接范围的等值线
             # pdb.set_trace()
             # print("*self.conn_isolines[bs]: ", *self.conn_isolines[bs])
-            print(f"bs: {bs}, type(bs): {type(bs)}")
+            # print(f"bs: {bs}, type(bs): {type(bs)}")
 
             ax.scatter(*self.conn_isolines[bs], color="gray", s=3)
             # 在图表上绘制基站的1MB / s数据速率等值线
@@ -772,13 +799,13 @@ class MComCore:
 
         # 创建并显示表格
         table = ax.table(
-            text,                           # 表格的内容，包含每个单元格的数据
-            rowLabels=rows,                 # 表格的行标签
-            colLabels=cols,                 # 表格的列标签
-            cellLoc="center",               # 将表格单元格中的内容居中对齐
-            edges="B",                      # 只显示表格底部的边框，其他边框隐藏
-            loc="upper center",             # 将表格放在图表的上方并居中
-            bbox=[0.0, -0.25, 1.0, 1.25],   # 定义表格的位置和大小，使用 [x, y, width, height] 格式
+            text,  # 表格的内容，包含每个单元格的数据
+            rowLabels=rows,  # 表格的行标签
+            colLabels=cols,  # 表格的列标签
+            cellLoc="center",  # 将表格单元格中的内容居中对齐
+            edges="B",  # 只显示表格底部的边框，其他边框隐藏
+            loc="upper center",  # 将表格放在图表的上方并居中
+            bbox=[0.0, -0.25, 1.0, 1.25],  # 定义表格的位置和大小，使用 [x, y, width, height] 格式
         )
         # 调整表格的字体大小
         table.auto_set_font_size(False)
