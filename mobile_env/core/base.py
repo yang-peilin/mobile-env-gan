@@ -1,3 +1,4 @@
+import os
 import string
 import time
 from collections import Counter, defaultdict
@@ -83,9 +84,19 @@ class MComCore:
         # 存储当前活跃的用户设备: 请求服务的用户设备，表示这些设备目前正在网络中使用资源
         self.active: List[UserEquipment] = None
         # 存储基站（BS）和用户设备（UE）之间的下行连接
-        self.connections: Dict[BaseStation, Set[UserEquipment]] = None
+        # self.bs2ue_connections = {
+        #     bs1: {ue1, ue2, ue3},  # 基站 bs1 连接了用户设备 ue1、ue2 和 ue3
+        #     bs2: {ue4},  # 基站 bs2 仅连接了用户设备 ue4
+        #     bs3: set()  # 基站 bs3 没有连接任何用户设备
+        # }
+        self.bs2ue_connections: Dict[BaseStation, Set[UserEquipment]] = None
         # 存储基站和用户设备之间的下行数据速率
-        self.datarates: Dict[Tuple[BaseStation, UserEquipment], float] = None
+        # self.datarates = {
+        #     (bs1, ue1): 12.5,  # 基站 bs1 到用户设备 ue1 的数据速率为 12.5 Mbps
+        #     (bs1, ue2): 7.8,  # 基站 bs1 到用户设备 ue2 的数据速率为 7.8 Mbps
+        #     (bs2, ue3): 5.2,  # 基站 bs2 到用户设备 ue3 的数据速率为 5.2 Mbps
+        # }
+        self.bs2ue_dataRates: Dict[Tuple[BaseStation, UserEquipment], float] = None
         # 存储每个用户设备的效用值（例如经过缩放的效用函数）
         self.utilities: Dict[UserEquipment, float] = None
         # 存储随机数生成器（RNG）
@@ -152,7 +163,7 @@ class MComCore:
                 "snr_tr": 2e-8,
                 # 用户设备的噪声功率，表示信号接收时的背景噪声
                 "noise": 1e-9,
-                "height": 1.5,
+                "height": 1.8,
             },
         }
 
@@ -224,9 +235,6 @@ class MComCore:
         # 如果传入了seed参数，调用self.seeding()方法为环境中的不同模块设置随机数生成器种子
         if seed is not None:
             self.seeding({"seed": seed})
-
-        # 如果 reset_rng_episode 为 True 或者随机数生成器 rng 还没有初始化
-        # 那么使用之前设置的 seed 初始化随机数生成器 rng
         if self.reset_rng_episode or self.rng is None:
             self.rng = np.random.default_rng(self.seed)
 
@@ -246,24 +254,38 @@ class MComCore:
         for ue in self.users.values():
             ue.x, ue.y = self.movement.initial_position(ue)
 
-        # 初始化活跃用户设备：将所有到达时间小于等于 0 的用户设备标记为活跃设备
-        # （即这些设备已经进入网络并请求服务）
         self.active = [ue for ue in self.users.values() if ue.stime <= 0]
         self.active = sorted(self.active, key=lambda ue: ue.ue_id)
 
-        # self.connections：初始化为一个空的字典，存储基站和用户设备之间的下行连接
-        self.connections = defaultdict(set)
-        # self.datarates：初始化为一个浮点字典，存储基站与用户设备之间的下行数据速率
-        self.datarates = defaultdict(float)
-        # self.utilities：初始化为一个空字典，存储每个用户设备的效用值
+        # self.connections = {
+        #     bs1: {ue1, ue2},  # 基站 bs1 连接了用户设备 ue1 和 ue2
+        #     bs2: {ue3},  # 基站 bs2 仅连接了用户设备 ue3
+        #     bs3: set()  # 基站 bs3 没有连接任何用户设备
+        # }
+        self.bs2ue_connections = defaultdict(set)
+
+        # self.datarates = {
+        #     (bs1, ue1): 10.5,  # 基站 bs1 向用户设备 ue1 分配的数据速率为 10.5 Mbps
+        #     (bs1, ue2): 7.8,  # 基站 bs1 向用户设备 ue2 分配的数据速率为 7.8 Mbps
+        #     (bs2, ue3): 5.2,  # 基站 bs2 向用户设备 ue3 分配的数据速率为 5.2 Mbps
+        # }
+        self.bs2ue_dataRates = defaultdict(float)
+
+        # self.utilities = {
+        #     ue1: 0.85,  # 用户设备 ue1 的效用值
+        #     ue2: 0.75,  # 用户设备 ue2 的效用值
+        #     ue3: -0.2,  # 用户设备 ue3 的效用值 (可能未连接或连接速率较低)
+        # }
         self.utilities = {}
 
-        # 设置最后一个用户设备的离开时间：self.max_departure
-        # 存储所有用户设备的离开时间中的最大值，表示仿真结束时最后一个用户设备的离开时间
         self.max_departure = max(ue.extime for ue in self.users.values())
 
         # 重置监控器：调用monitor对象的reset()方法，重置上一轮仿真中的监控结果
         self.monitor.reset()
+
+        # 清空数据，准备下一轮循环
+        self.all_step_datarates = {}
+        self.all_step_utilities = {}
 
     # 如果SNR超过了用户设备的最小门限，则连接可以建立
     def check_connectivity(self, bs: BaseStation, ue: UserEquipment) -> bool:
@@ -274,10 +296,10 @@ class MComCore:
     def update_connections(self) -> None:
         connections = {
             bs: set(ue for ue in ues if self.check_connectivity(bs, ue))
-            for bs, ues in self.connections.items()
+            for bs, ues in self.bs2ue_connections.items()
         }
-        self.connections.clear()
-        self.connections.update(connections)
+        self.bs2ue_connections.clear()
+        self.bs2ue_connections.update(connections)
 
     # 用于在仿真环境中执行一个时间步的操作
     # 一个完整的时间步长中，用户设备与基站之间的交互、资源分配、效用计算和奖励生成的过程
@@ -287,17 +309,18 @@ class MComCore:
         self.update_connections()
 
         # 根据基站和用户设备的连接情况 重新分配每个基站与连接的用户设备之间的下行数据速率
-        self.datarates = {}
+        self.bs2ue_dataRates = {}
         for bs in self.stations.values():
             drates = self.station_allocation(bs)
-            self.datarates.update(drates)
+            self.bs2ue_dataRates.update(drates)
 
         # 对用户设备的多个连接进行数据速率的聚合，计算每个用户设备的总数据速率
-        self.macro = self.macro_datarates(self.datarates)
+        self.macro = self.macro_datarates(self.bs2ue_dataRates)
 
-        # 根据每个活跃用户设备的总数据速率，计算它们的 效用值
+        # 根据每个活跃用户设备的总数据速率，计算它们的效用值
         self.utilities = {
-            ue: self.utility.utility(self.macro[ue]) for ue in self.active
+            ue: self.utility.utility(self.macro.get(ue, 0.0))  # 默认值 0.0，避免 KeyError
+            for ue in self.active
         }
 
         # 将效用值缩放到[-1, 1]的范围
@@ -310,6 +333,7 @@ class MComCore:
 
         # 记录当前时间步的特征数据
         obs = self.features()
+
         # 将当前时间步的特征数据添加到保存的列表中
         self.record_step_data(obs)
 
@@ -321,25 +345,22 @@ class MComCore:
         for ue in self.active:
             available_bs = [bs for bs in self.stations.values() if self.check_connectivity(bs, ue)]
             if available_bs:
-                # 找到离用户最近的基站
-                closest_bs = min(
-                    available_bs, key=lambda bs: np.linalg.norm([ue.x - bs.point.x, ue.y - bs.point.y])
-                )
+                closest_bs = min(available_bs, key=lambda bs: np.linalg.norm([ue.x - bs.point.x, ue.y - bs.point.y]))
 
                 # 首先断开该用户与所有基站的连接，保证只连接最近的基站
-                for bs in self.connections:
-                    if ue in self.connections[bs]:
-                        self.connections[bs].remove(ue)
+                for bs in self.bs2ue_connections:
+                    if ue in self.bs2ue_connections[bs]:
+                        self.bs2ue_connections[bs].remove(ue)
 
                 # 如果最近的基站还没有连接上该用户，则连接
-                if closest_bs not in self.connections:
-                    self.connections[closest_bs] = set()
-                self.connections[closest_bs].add(ue)
+                if closest_bs not in self.bs2ue_connections:
+                    self.bs2ue_connections[closest_bs] = set()
+                self.bs2ue_connections[closest_bs].add(ue)
 
         # 找出离开仿真环境的用户设备，将它们从基站的连接列表中移除
         leaving = set([ue for ue in self.active if ue.extime <= self.time])
-        for bs, ues in self.connections.items():
-            self.connections[bs] = ues - leaving
+        for bs, ues in self.bs2ue_connections.items():
+            self.bs2ue_connections[bs] = ues - leaving
 
         self.active = sorted(
             [
@@ -349,11 +370,6 @@ class MComCore:
             ],
             key=lambda ue: ue.ue_id,
         )
-
-        # 在移动后更新每一个用户和基站之间的 data rate
-        for bs in self.stations.values():
-            drates = self.station_allocation(bs)
-            self.datarates.update(drates)
 
         # 将仿真时间步 + 1，向前推进一个时间步
         self.time += 1
@@ -387,37 +403,50 @@ class MComCore:
 
     # 在数据收集完成后调用此方法来查看数据的维度并保存为CSV
     def save_all_step_data(self, idx):
-        # 计算并打印 all_step_datarates 的行数和列数
-        max_datarates_steps = max(len(datarates) for datarates in self.all_step_datarates.values())
-        print(f"all_step_datarates: {len(self.all_step_datarates)} rows, {max_datarates_steps} columns")
+        # 检查数据是否为空
+        if not self.all_step_datarates or not self.all_step_utilities:
+            print("数据记录为空，无法保存。")
+            return
 
-        # 将 all_step_datarates 转换为 DataFrame 格式
-        datarate_records = {"UE ID": list(self.all_step_datarates.keys())}
-        for step in range(max_datarates_steps):
-            datarate_records[f"Step {step + 1}"] = [
-                datarates[step] if step < len(datarates) else None
-                for datarates in self.all_step_datarates.values()
-            ]
-        datarate_df = pd.DataFrame(datarate_records)
-        # 保存到 CSV 文件，文件名包含 idx
-        datarate_df.to_csv(f"all_step_datarates_{idx}.csv", index=False)
+        try:
+            # 数据速率记录
+            max_datarates_steps = max(len(datarates) for datarates in self.all_step_datarates.values())
+            # print(f"all_step_datarates: {len(self.all_step_datarates)} rows, {max_datarates_steps} columns")
 
-        # 计算并打印 all_step_utilities 的行数和列数
-        max_utilities_steps = max(len(utilities) for utilities in self.all_step_utilities.values())
-        print(f"all_step_utilities: {len(self.all_step_utilities)} rows, {max_utilities_steps} columns")
+            datarate_records = {"UE ID": list(self.all_step_datarates.keys())}
+            for step in range(max_datarates_steps):
+                datarate_records[f"Step {step + 1}"] = [
+                    datarates[step] if step < len(datarates) else None
+                    for datarates in self.all_step_datarates.values()
+                ]
+            data_rate_df = pd.DataFrame(datarate_records)
 
-        # 将 all_step_utilities 转换为 DataFrame 格式
-        utility_records = {"UE ID": list(self.all_step_utilities.keys())}
-        for step in range(max_utilities_steps):
-            utility_records[f"Step {step + 1}"] = [
-                utilities[step] if step < len(utilities) else None
-                for utilities in self.all_step_utilities.values()
-            ]
-        utility_df = pd.DataFrame(utility_records)
-        # 保存到 CSV 文件，文件名包含 idx
-        utility_df.to_csv(f"all_step_utilities_{idx}.csv", index=False)
+            # 保存到指定文件夹
+            data_rate_file = os.path.join(
+                "/Users/yangpeilin/NUS CE/project/mobile-env-gan/mobile_env/collectData/UserDataRate",
+                f"dataRates_{idx}.csv")
+            data_rate_df.to_csv(data_rate_file, index=False)
 
-        print(f"数据保存完成：all_step_datarates_{idx}.csv 和 all_step_utilities_{idx}.csv")
+            # 效用值记录
+            max_utilities_steps = max(len(utilities) for utilities in self.all_step_utilities.values())
+            # print(f"all_step_utilities: {len(self.all_step_utilities)} rows, {max_utilities_steps} columns")
+
+            utility_records = {"UE ID": list(self.all_step_utilities.keys())}
+            for step in range(max_utilities_steps):
+                utility_records[f"Step {step + 1}"] = [
+                    utilities[step] if step < len(utilities) else None
+                    for utilities in self.all_step_utilities.values()
+                ]
+            utility_df = pd.DataFrame(utility_records)
+
+            # 保存到指定文件夹
+            utility_file = os.path.join("/Users/yangpeilin/NUS CE/project/mobile-env-gan/mobile_env/collectData/UserQoE",
+                                        f"all_step_utilities_{idx}.csv")
+            utility_df.to_csv(utility_file, index=False)
+            # print(f"数据保存完成：{data_rate_file} 和 {utility_file}")
+
+        except Exception as e:
+            print(f"保存数据失败: {e}")
 
     # 判断当前时间是否已经达到了最小的结束时间
     @property
@@ -425,18 +454,23 @@ class MComCore:
         return self.time >= min(self.EP_MAX_TIME, self.max_departure)
 
     # 遍历基站和用户设备之间的连接，聚合每个用户设备的总数据速率
-    def macro_datarates(self, datarates):
+    def macro_datarates(self, bs2ue_dataRates):
         ue_datarates = Counter()
-        # self.datarates是一个字典，表示基站与用户设备之间的连接及其对应的数据速率
-        for (bs, ue), datarate in datarates.items():
+        connected_ues = set()
+
+        for (bs, ue), datarate in bs2ue_dataRates.items():
+            # 检查当前用户是否已经连接到另一个基站
+            assert ue not in connected_ues, f"用户设备 {ue} 多次连接，当前基站：{bs}"
             ue_datarates.update({ue: datarate})
+            connected_ues.add(ue)
+
         return ue_datarates
 
     # 计算每个用户设备最终能接收到的下行数据速率
     def station_allocation(self, bs) -> Dict:
         # 获取与基站 bs 建立连接的用户集合
-        if bs in self.connections:
-            conns = self.connections[bs]
+        if bs in self.bs2ue_connections:
+            conns = self.bs2ue_connections[bs]
         else:
             conns = set()  # 如果基站不在 connections 中，使用空集合
 
@@ -444,6 +478,12 @@ class MComCore:
         snrs = [self.channel.snr(bs, ue) for ue in conns]
 
         # 计算每个用户设备的最大数据速率
+        # zip(snrs, conns) = > [(snrs[0], conns[0]), (snrs[1], conns[1]), (snrs[2], conns[2]), ...]
+        # max_allocation = [
+        #     self.channel.datarate(bs, ue1, 10.5),
+        #     self.channel.datarate(bs, ue2, 8.2),
+        #     self.channel.datarate(bs, ue3, 5.6)
+        # ]
         max_allocation = [
             self.channel.datarate(bs, ue, snr) for snr, ue in zip(snrs, conns)
         ]
@@ -455,14 +495,18 @@ class MComCore:
         return {(bs, ue): rate for ue, rate in zip(conns, rates)}
 
     # 计算每个基站（BaseStation）的平均效用值，并返回一个字典，表示各个基站的效用情况
+    # {
+    #     BaseStation1: UtilityValue1,
+    #     BaseStation2: UtilityValue2,
+    #     ...
+    # }
     def station_utilities(self) -> Dict[BaseStation, UserEquipment]:
-        # 定义空闲基站的效用值为缩放后的效用下界
         idle = self.utility.scale(self.utility.lower)
 
         # 计算每个基站的平均效用值
         util = {
-            bs: sum(self.utilities[ue] for ue in self.connections[bs]) / len(self.connections[bs])
-            if self.connections[bs]
+            bs: sum(self.utilities[ue] for ue in self.bs2ue_connections[bs]) / len(self.bs2ue_connections[bs])
+            if self.bs2ue_connections[bs]
             else idle
             for bs in self.stations.values()
         }
@@ -495,17 +539,21 @@ class MComCore:
 
         # 这是一个内部函数，用于为一个用户设备ue生成其观测特征
         def ue_features(ue: UserEquipment):
-            # 生成一个one - hot编码的向量，表示用户设备ue当前与哪些基站连接
-            connections = [bs for bs in stations if ue in self.connections[bs]]
+            connections = [bs for bs in stations if ue in self.bs2ue_connections[bs]]
+
+            # 当前情况每个用户只可能连接最近的基站 所以加上这个assert
+            assert len(connections) <= 1
+
             onehot = np.zeros(self.NUM_STATIONS, dtype=np.float32)
             onehot[[bs.bs_id for bs in connections]] = 1
 
-            # 计算用户设备与每个基站之间的 SNR，并对这些 SNR 进行归一化处理
+            # 计算用户设备与每个基站之间的信噪比(SNR)，并对这些SNR值进行归一化处理，使其值在[0, 1]范围内
             snrs = [self.channel.snr(bs, ue) for bs in stations]
             maxsnr = max(snrs)
             snrs = np.asarray([snr / maxsnr for snr in snrs], dtype=np.float32)
 
-            # 获取特定用户设备 (ue) 的效用值 (utility)，如果该用户设备的效用值未定义，则使用缩放后的默认效用值
+            # 获取用户设备 ue 的效用值 (Utility)，并将该值转换为一个 NumPy 数组
+            # 如果该用户设备的效用值未定义，则使用缩放后的默认效用值
             utility = (
                 self.utilities[ue]
                 if ue in self.utilities
@@ -513,8 +561,8 @@ class MComCore:
             )
             utility = np.asarray([utility], dtype=np.float32)
 
-            # 计算并广播特定用户设备(ue)与各基站(stations)之间的效用值(util_bcast)
-            # 如果用户设备可以连接到某个基站，则使用该基站的效用值；如果不能连接，则使用一个默认的"空闲效用"值
+            # 这段代码的主要功能是构建用户设备与所有基站之间的广播效用值(Utility Broadcast)，
+            # 用于描述用户设备在每个基站上的潜在效用值。如果用户设备未连接到某个基站，则该基站的效用值设置为默认效用值(idle)
             idle = self.utility.scale(self.utility.lower)
             util_bcast = {
                 bs: util if self.check_connectivity(bs, ue) else idle
@@ -525,7 +573,7 @@ class MComCore:
             # 计算基站连接的用户设备数量
             def num_connected(bs):
                 if self.check_connectivity(bs, ue):
-                    return len(self.connections[bs])
+                    return len(self.bs2ue_connections[bs])
                 return 0.0
 
             # 遍历所有基站，计算每个基站连接的用户设备数量
@@ -537,7 +585,7 @@ class MComCore:
                 [num / total for num in stations_connected], dtype=np.float32
             )
 
-            # 将数据速率也包含在特征中
+            # 获取用户设备 ue 的数据速率 (Data Rate)，并将其 转换为 NumPy 数组
             datarate = np.asarray([self.macro.get(ue, 0.0)], dtype=np.float32)
 
             return {
@@ -723,9 +771,11 @@ class MComCore:
 
         # 绘制基站和用户设备之间的连接
         for bs in self.stations.values():
-            for ue in self.connections[bs]:
-                # 计算该连接对用户设备总效用的贡献比例
-                share = self.datarates[(bs, ue)] / self.macro[ue]
+            for ue in self.bs2ue_connections[bs]:
+
+                # share = self.bs2ue_dataRates[(bs, ue)] / self.macro[ue]
+                share = self.bs2ue_dataRates.get((bs, ue), 0.0) / self.macro.get(ue, 1.0)
+
                 # 根据贡献比例，使用颜色映射为该连接分配颜色
                 share = share * self.utility.unscale(self.utilities[ue])
                 color = colormap(unorm(share))
