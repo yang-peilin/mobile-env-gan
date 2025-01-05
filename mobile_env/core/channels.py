@@ -21,7 +21,7 @@ class Channel:
         pass
 
     # 计算基站和用户设备之间的信噪比
-    def snr(self, bs: BaseStation, ue: UserEquipment):
+    def calculateSNR(self, bs: BaseStation, ue: UserEquipment):
         loss = self.power_loss(bs, ue)
         power = 10 ** ((bs.tx_power - loss) / 10)
         return power / ue.noise
@@ -55,7 +55,7 @@ class Channel:
             # 基站bs在给定位置point上的虚拟用户设备dummy所接收到的信号数据速率
             def drate(point):
                 dummy.x, dummy.y = point
-                snr = self.snr(bs, dummy)
+                snr = self.calculateSNR(bs, dummy)
 
                 return self.datarate(bs, dummy, snr)
 

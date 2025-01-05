@@ -1,7 +1,8 @@
+import json
 import os
 import string
-import time
 from collections import Counter, defaultdict
+from traceback import TracebackException
 from typing import Dict, List, Set, Tuple
 
 import matplotlib.patheffects as pe
@@ -28,91 +29,62 @@ class MComCore:
     NOOP_ACTION = 0
     metadata = {"render_modes": ["rgb_array", "human"]}
 
-    def __init__(self, stations, users, config={}, render_mode=None):
+    def __init__(
+            self,
+            stations: list[BaseStation],
+            users: list[UserEquipment],
+            config=None,
+            render_mode=None
+    ):
 
-        self.macro = None
-
-        # 保存渲染模式
+        self.max_departure = None
+        if config is None:
+            config = {}
         self.render_mode = render_mode
         assert render_mode in self.metadata["render_modes"] + [None]
 
-        # 递归地合并传入的配置字典 config 和默认配置字典
+        # 初始化config
         config = deep_dict_merge(self.default_config(), config)
-        # 初始化种子和随机数生成器（RNG）配置
         config = self.seeding(config)
 
-        # 仿真环境的宽度和高度
+        # 定义宽高和随机种子
         self.width, self.height = config["width"], config["height"]
-        # 确保仿真中的随机事件（如用户移动）可以重现
         self.seed = config["seed"]
-        # 决定是否在每个仿真回合结束时重置随机数生成器
         self.reset_rng_episode = config["reset_rng_episode"]
+        self.rng = None
 
-        # 用于定义用户设备的到达模式（例如NoDeparture类），决定用户设备何时请求服务
-        self.arrival = config["arrival"](**config["arrival_params"])
-        # 信道模型，决定基站与用户设备之间通信的特性（例如信号强度、干扰等）
-        self.channel = config["channel"](**config["channel_params"])
-        # 调度器，负责管理基站与用户设备之间的资源分配
-        self.scheduler = config["scheduler"](**config["scheduler_params"])
-        # 移动模式，定义用户设备在仿真环境中的移动方式
-        self.movement = config["movement"](**config["movement_params"])
-        # 效用函数，可能用于评估仿真过程中的某些性能指标（如用户满意度、数据吞吐量等）
-        self.utility = config["utility"](**config["utility_params"])
+        # 定义使用模型
+        self.arrivalModel = config["arrival"](**config["arrival_params"])
+        self.channelModel = config["channel"](**config["channel_params"])
+        self.schedulerModel = config["scheduler"](**config["scheduler_params"])
+        self.movementModel = config["movement"](**config["movement_params"])
+        self.utilityModel = config["utility"](**config["utility_params"])
 
         # define parameters that track the simulation's progress
-        # 仿真的最大时间长度，定义了每轮仿真的持续时间
         self.EP_MAX_TIME = config["EP_MAX_TIME"]
         self.time = None
         self.closed = False
 
-        # 将输入的基站列表转换为字典，键为基站的bs_id，值为基站对象
-        self.stations = {bs.bs_id: bs for bs in stations}
-        # 将用户设备列表转换为字典，键为用户设备的ue_id，值为用户对象
-        self.users = {ue.ue_id: ue for ue in users}
-        self.NUM_STATIONS = len(self.stations)
-        self.NUM_USERS = len(self.users)
+        # 初始化用户和基站
+        self.stationDict = {bs.bs_id: bs for bs in stations}
+        self.userDict = {ue.ue_id: ue for ue in users}
+        self.NUM_STATIONS = len(self.stationDict)
+        self.NUM_USERS = len(self.userDict)
 
-        # define sizes of base feature set that can or cannot be observed
-        self.feature_sizes = {
-            "connections": self.NUM_STATIONS,  # 表示每个基站的连接数或连接状态
-            "snrs": self.NUM_STATIONS,  # 表示每个基站的 SNR 状态
-            "utility": 1,
-            "bcast": self.NUM_STATIONS,
-            "stations_connected": self.NUM_STATIONS,  # 表示每个基站的连接状态
-        }
-
-        # 存储当前活跃的用户设备: 请求服务的用户设备，表示这些设备目前正在网络中使用资源
-        self.active: List[UserEquipment] = None
-        # 存储基站（BS）和用户设备（UE）之间的下行连接
-        # self.bs2ue_connections = {
-        #     bs1: {ue1, ue2, ue3},  # 基站 bs1 连接了用户设备 ue1、ue2 和 ue3
-        #     bs2: {ue4},  # 基站 bs2 仅连接了用户设备 ue4
-        #     bs3: set()  # 基站 bs3 没有连接任何用户设备
-        # }
-        self.bs2ue_connections: Dict[BaseStation, Set[UserEquipment]] = None
-        # 存储基站和用户设备之间的下行数据速率
-        # self.datarates = {
-        #     (bs1, ue1): 12.5,  # 基站 bs1 到用户设备 ue1 的数据速率为 12.5 Mbps
-        #     (bs1, ue2): 7.8,  # 基站 bs1 到用户设备 ue2 的数据速率为 7.8 Mbps
-        #     (bs2, ue3): 5.2,  # 基站 bs2 到用户设备 ue3 的数据速率为 5.2 Mbps
-        # }
-        self.bs2ue_dataRates: Dict[Tuple[BaseStation, UserEquipment], float] = None
-        # 存储每个用户设备的效用值（例如经过缩放的效用函数）
-        self.utilities: Dict[UserEquipment, float] = None
-        # 存储随机数生成器（RNG）
-        self.rng = None
+        # 定义用户和基站之间的关系
+        self.activeUsers: List[UserEquipment] = []
+        self.bs2ue_connections: Dict[BaseStation, Set[UserEquipment]] = {}
+        self.bs2ue_dataRates: Dict[Tuple[BaseStation, UserEquipment], float] = {}
+        self.ue_utilities: Dict[UserEquipment, float] = {}
+        self.allUserDataRates = None
 
         # pygame中的窗口对象
         self.window = None
-        # pygame中的时钟对象
         self.clock = None
-        # 渲染基站与用户设备之间连接等值线的对象
-        self.conn_isolines = None
-        # 渲染移动设备相关的等值线的对象
-        self.mb_isolines = None
+        self.conn_iso_lines = None
+        self.mb_iso_lines = None
 
         # 为仿真环境设置度量指标（metrics）
-        # scalar_metrics：表示标量类型的度量，例如总连接数、用户设备数量等
         config["metrics"]["scalar_metrics"].update(
             {
                 "number connections": metrics.number_connections,  # 基站和用户设备之间的总连接数
@@ -121,71 +93,47 @@ class MComCore:
                 "mean datarate": metrics.mean_datarate,  # 所有用户设备的平均数据速率
             }
         )
-        # 在仿真过程中追踪各个度量指标的变化
         self.monitor = Monitor(**config["metrics"])
 
-        # 初始化存储用户在所有时间步中的数据速率和效用值的字典
-        self.all_step_datarates = {}
-        self.all_step_utilities = {}
+        self.users_trajectoryList = None
+        self.users_dataRateList = None
+        self.userQoEList = None
 
     @classmethod
     def default_config(cls):
         width, height = 200, 200
         ep_time = 20
         config = {
-            # 环境的宽度和高度，默认设置为 200
             "width": width,
             "height": height,
-            # 仿真回合的最大时间长度，默认值为100，表示每个仿真回合的持续时间
             "EP_MAX_TIME": ep_time,
             "seed": 2024,
-            # 一个布尔值，表示是否在每个仿真回合结束时重置随机数生成器
             "reset_rng_episode": False,
-            # 定义用户设备的到达和离开模式。NoDeparture 表示用户设备一旦加入网络，就不会离开
             "arrival": NoDeparture,
-            # channel: OkumuraHata：信道模型，用于模拟基站和用户设备之间的信号传播损耗
             "channel": OkumuraHata,
-            # scheduler: ResourceFair：调度器模型，用于管理基站与用户设备之间的资源分配
             "scheduler": ResourceFair,
-            # movement: RandomWaypointMovement：用户设备的移动模型
             "movement": RandomWaypointMovement,
-            # utility: BoundedLogUtility：效用函数模型，用于计算用户设备的体验质量（QoE）
             "utility": BoundedLogUtility,
-            # bw：基站的带宽 单位为赫兹（Hz）
-            # freq：基站的工作频率 单位为 MHz
-            # tx：基站的发射功率，单位为dBm
-            # height：基站的高度，单位为米
-            "bs": {"bw": 9e6, "freq": 2500, "tx": 30, "height": 50},
+            "bs": {"bw": 9e6, "freq": 2500, "tx": 40, "height": 50},
             "ue": {
-                # velocity：用户设备的移动速度，单位为米每秒
                 "velocity": 1.5,
-                # snr_tr：用户设备的SNR（信噪比）阈值
                 "snr_tr": 2e-8,
-                # 用户设备的噪声功率，表示信号接收时的背景噪声
                 "noise": 1e-9,
-                "height": 1.8,
+                "height": 1.6,
             },
         }
 
-        # 为仿真环境中不同的模块（如用户设备的到达模式、信道模型、调度器、移动模型和效用函数等）设置
-        # 默认的参数，并将这些参数添加到仿真环境的配置字典config中
-        # ep_time：表示仿真回合的最大时间长度
         aparams = {"ep_time": ep_time, "reset_rng_episode": False}
         config.update({"arrival_params": aparams})
-        # 信道模型
         config.update({"channel_params": {}})
-        # 调度器的参数 (scheduler_params)
         config.update({"scheduler_params": {}})
-        # 移动模型的参数(movement_params)
         mparams = {
             "width": width,
             "height": height,
-            "reset_rng_episode": False,
+            "reset_rng_episode": True,
         }
         config.update({"movement_params": mparams})
-        # 效用函数的参数(utility_params)
         uparams = {"lower": -20, "upper": 20, "coeffs": (10, 0, 10)}
-        # coeffs：是一个元组，表示效用函数的系数
         config.update({"utility_params": uparams})
 
         # 为仿真环境的度量系统（metricssystem） 设置默认的配置参数
@@ -217,16 +165,10 @@ class MComCore:
         for num, key in enumerate(keys):
             if key not in config:
                 config[key] = {}
-            # 为每个模块的种子参数设置一个不同的值
             config[key]["seed"] = seed + num + 1
 
         return config
 
-    # 用于在仿真环境中重置环境到初始状态
-    # 该方法通常在仿真中的每个新回合开始时调用，用于清除上一次仿真的状态并初始化新的仿真状态
-    # 包括时间、随机数生成器、用户设备状态（如位置、连接状态）、基站和用户设备之间的连接等初始化操作
-    # 返回的结果是新的观测值（obs）和额外信息（info）
-    # def reset(self, *, seed=None, options=None):
     def reset(self, *, seed=None):
 
         # 将仿真的时间重置为 0.0
@@ -234,219 +176,232 @@ class MComCore:
 
         # 如果传入了seed参数，调用self.seeding()方法为环境中的不同模块设置随机数生成器种子
         if seed is not None:
-            self.seeding({"seed": seed})
+            self.seed = seed  # 保存固定种子
+            # self.seeding({"seed": seed})
+
         if self.reset_rng_episode or self.rng is None:
             self.rng = np.random.default_rng(self.seed)
 
         # 调用arrival、channel、scheduler、movement和utility对象的reset()方法，重置这些模块的内部状态
-        self.arrival.reset()
-        self.channel.reset()
-        self.scheduler.reset()
-        self.movement.reset()
-        self.utility.reset()
+        self.arrivalModel.reset()
+        self.channelModel.reset()
+        self.schedulerModel.reset()
+        self.movementModel.reset()
+        self.utilityModel.reset()
 
         # 为每个用户设备UE生成新的到达时间(stime)和离开时间(extime)，模拟用户设备何时加入和离开网络
-        for ue in self.users.values():
-            ue.stime = self.arrival.arrival(ue)
-            ue.extime = self.arrival.departure(ue)
+        for ue in self.userDict.values():
+            ue.startTime = self.arrivalModel.setArrivalTime(ue)
+            ue.exitTime = self.arrivalModel.setDepartureTime(ue)
 
         # 为每个用户设备生成新的初始位置
-        for ue in self.users.values():
-            ue.x, ue.y = self.movement.initial_position(ue)
+        for ue in self.userDict.values():
+            ue.x, ue.y = self.movementModel.initial_position(ue)
 
-        self.active = [ue for ue in self.users.values() if ue.stime <= 0]
-        self.active = sorted(self.active, key=lambda ue: ue.ue_id)
-
-        # self.connections = {
-        #     bs1: {ue1, ue2},  # 基站 bs1 连接了用户设备 ue1 和 ue2
-        #     bs2: {ue3},  # 基站 bs2 仅连接了用户设备 ue3
-        #     bs3: set()  # 基站 bs3 没有连接任何用户设备
-        # }
         self.bs2ue_connections = defaultdict(set)
-
-        # self.datarates = {
-        #     (bs1, ue1): 10.5,  # 基站 bs1 向用户设备 ue1 分配的数据速率为 10.5 Mbps
-        #     (bs1, ue2): 7.8,  # 基站 bs1 向用户设备 ue2 分配的数据速率为 7.8 Mbps
-        #     (bs2, ue3): 5.2,  # 基站 bs2 向用户设备 ue3 分配的数据速率为 5.2 Mbps
-        # }
         self.bs2ue_dataRates = defaultdict(float)
-
-        # self.utilities = {
-        #     ue1: 0.85,  # 用户设备 ue1 的效用值
-        #     ue2: 0.75,  # 用户设备 ue2 的效用值
-        #     ue3: -0.2,  # 用户设备 ue3 的效用值 (可能未连接或连接速率较低)
-        # }
-        self.utilities = {}
-
-        self.max_departure = max(ue.extime for ue in self.users.values())
+        self.ue_utilities = {}
+        self.max_departure = max(ue.exitTime for ue in self.userDict.values())
 
         # 重置监控器：调用monitor对象的reset()方法，重置上一轮仿真中的监控结果
         self.monitor.reset()
 
-        # 清空数据，准备下一轮循环
-        self.all_step_datarates = {}
-        self.all_step_utilities = {}
+        self.userQoEList = {ue.ue_id: [] for ue in self.userDict.values()}  # 初始化每个用户的 QoE 列表
 
     # 如果SNR超过了用户设备的最小门限，则连接可以建立
     def check_connectivity(self, bs: BaseStation, ue: UserEquipment) -> bool:
-        snr = self.channel.snr(bs, ue)
+        snr = self.channelModel.calculateSNR(bs, ue)
         return snr > ue.snr_threshold
+
+    def available_connections(self, ue: UserEquipment) -> Set:
+        stations = self.stationDict.values()
+        return {bs for bs in stations if self.check_connectivity(bs, ue)}
 
     # 只保留符合check_connectivity的连接
     def update_connections(self) -> None:
-        connections = {
+        bs2ue_connections = {
             bs: set(ue for ue in ues if self.check_connectivity(bs, ue))
             for bs, ues in self.bs2ue_connections.items()
         }
         self.bs2ue_connections.clear()
-        self.bs2ue_connections.update(connections)
+        self.bs2ue_connections.update(bs2ue_connections)
 
     # 用于在仿真环境中执行一个时间步的操作
-    # 一个完整的时间步长中，用户设备与基站之间的交互、资源分配、效用计算和奖励生成的过程
-    def step(self):
+    def step(self, epoch_number, curr_step):
+        # 调用移动模型，根据用户设备的移动模式更新位置
+        for ue in self.activeUsers:
+            ue.x, ue.y = self.movementModel.move(ue)
 
-        # 更新基站与用户设备之间的连接状态，移除那些已经不再满足连接条件的连接
-        self.update_connections()
+        # 找到符合 SNR 阈值的最近基站，并连接到该基站
+        self.bs2ue_connections = defaultdict(set)  # 清空连接
+        for ue in self.activeUsers:
+            available_bs = [bs for bs in self.stationDict.values() if self.check_connectivity(bs, ue)]
+            if available_bs:
+                closest_bs = min(available_bs, key=lambda bs: np.linalg.norm([ue.x - bs.point.x, ue.y - bs.point.y]))
+                self.bs2ue_connections[closest_bs].add(ue)
 
-        # 根据基站和用户设备的连接情况 重新分配每个基站与连接的用户设备之间的下行数据速率
+        # 计算数据速率
         self.bs2ue_dataRates = {}
-        for bs in self.stations.values():
-            drates = self.station_allocation(bs)
+        for bs in self.stationDict.values():
+            drates = self.allocateDataRate2User(bs)
             self.bs2ue_dataRates.update(drates)
 
-        # 对用户设备的多个连接进行数据速率的聚合，计算每个用户设备的总数据速率
-        self.macro = self.macro_datarates(self.bs2ue_dataRates)
+        # allUserDatarates 存储每个用户设备的总数据速率的字典
+        self.allUserDataRates = self.user_total_datarates(self.bs2ue_dataRates)
 
-        # 根据每个活跃用户设备的总数据速率，计算它们的效用值
-        self.utilities = {
-            ue: self.utility.utility(self.macro.get(ue, 0.0))  # 默认值 0.0，避免 KeyError
-            for ue in self.active
+        # 更新用户的效用值QoE
+        self.ue_utilities = {
+            ue: self.utilityModel.scaleUtility(
+                self.utilityModel.calculateUtility(self.allUserDataRates.get(ue, 0.0))
+            )
+            for ue in self.activeUsers
         }
 
-        # 将效用值缩放到[-1, 1]的范围
-        self.utilities = {
-            ue: self.utility.scale(util) for ue, util in self.utilities.items()
-        }
+        # 保存当前基站布局、用户位置和用户-基站速率连接
+        self.save_layout_and_data_rates(epoch_number, curr_step)
+
+        # 更新每个用户的数据速率和运动轨迹
+        for ue in self.activeUsers:
+            datarate = self.allUserDataRates.get(ue, 0.0)
+            self.users_dataRateList[ue.ue_id].append(round(datarate, 2))
+            self.users_trajectoryList[ue.ue_id].append((ue.x, ue.y))
+            qoe = self.ue_utilities.get(ue, 0.0)  # 获取用户的当前 QoE
+            self.userQoEList[ue.ue_id].append(round(qoe, 2))  # 将 QoE 追加到对应用户的列表中
 
         # 记录当前的用户指标
         self.monitor.update(self)
 
-        # 记录当前时间步的特征数据
-        obs = self.features()
+        # # 打印调试信息
+        # for ue in self.userDict.values():
+        #     datarate = self.allUserDataRates.get(ue, 0.0)
+        #     utility = self.ue_utilities.get(ue, self.utilityModel.scaleUtility(self.utilityModel.lower))
+        #     print(f"UE ID: {ue.ue_id}, Data Rate: {datarate}, Utility: {utility}")
 
-        # 将当前时间步的特征数据添加到保存的列表中
-        self.record_step_data(obs)
+        self.time += 1
 
-        # 调用移动模型 movement，根据用户设备的移动模式更新它们的位置
-        for ue in self.active:
-            ue.x, ue.y = self.movement.move(ue)
-
-        # 找到符合 SNR 阈值的最近基站，并连接到该基站
-        for ue in self.active:
-            available_bs = [bs for bs in self.stations.values() if self.check_connectivity(bs, ue)]
-            if available_bs:
-                closest_bs = min(available_bs, key=lambda bs: np.linalg.norm([ue.x - bs.point.x, ue.y - bs.point.y]))
-
-                # 首先断开该用户与所有基站的连接，保证只连接最近的基站
-                for bs in self.bs2ue_connections:
-                    if ue in self.bs2ue_connections[bs]:
-                        self.bs2ue_connections[bs].remove(ue)
-
-                # 如果最近的基站还没有连接上该用户，则连接
-                if closest_bs not in self.bs2ue_connections:
-                    self.bs2ue_connections[closest_bs] = set()
-                self.bs2ue_connections[closest_bs].add(ue)
-
-        # 找出离开仿真环境的用户设备，将它们从基站的连接列表中移除
-        leaving = set([ue for ue in self.active if ue.extime <= self.time])
+        # 移除离开仿真环境的用户
+        leaving = set([ue for ue in self.activeUsers if ue.exitTime <= self.time])
         for bs, ues in self.bs2ue_connections.items():
             self.bs2ue_connections[bs] = ues - leaving
 
-        self.active = sorted(
-            [
-                ue
-                for ue in self.users.values()
-                if ue.extime > self.time and ue.stime <= self.time
-            ],
+        # 更新活跃用户列表
+        self.activeUsers = sorted(
+            [ue for ue in self.userDict.values() if ue.exitTime > self.time >= ue.startTime],
             key=lambda ue: ue.ue_id,
         )
 
-        # 将仿真时间步 + 1，向前推进一个时间步
-        self.time += 1
-
-        # 检查仿真结束：如果仿真时间已经结束且有可视化窗口，则关闭环境
         if self.time_is_up and self.window:
             self.close()
 
-        if not self.active and not self.time_is_up:
-            return self.step({})
+        return
 
-        info = self.monitor.info()
+    def save_layout_and_data_rates(self, epoch_number, curr_step):
+        # 保存基站位置
+        base_station_positions = [
+            {"bs_id": bs.bs_id, "x": round(float(bs.point.x), 2), "y": round(float(bs.point.y), 2)}
+            for bs in self.stationDict.values()
+        ]
+        base_station_file = os.path.join(
+            "..", "collectData", "BaseStationPosition", f"stations_info_{epoch_number}_{curr_step}.json"
+        )
+        os.makedirs(os.path.dirname(base_station_file), exist_ok=True)
+        with open(base_station_file, "w") as f:
+            json.dump(base_station_positions, f, indent=4)
+        # print(f"基站布局已保存: {base_station_file}")
 
-        return info
+        # 保存用户位置
+        user_positions = [
+            {"ue_id": ue.ue_id, "x": round(float(ue.x), 2), "y": round(float(ue.y), 2)}
+            for ue in self.userDict.values()
+        ]
+        user_position_file = os.path.join(
+            "..", "collectData", "UserEquipmentPosition", f"user_positions_{epoch_number}_{curr_step}.json"
+        )
+        os.makedirs(os.path.dirname(user_position_file), exist_ok=True)
+        with open(user_position_file, "w") as f:
+            json.dump(user_positions, f, indent=4)
+        # print(f"用户位置已保存: {user_position_file}")
 
-    def record_step_data(self, obs):
-        """记录当前时间步的所有用户特征数据到全局数据集中"""
-        for ue_id, ue_features in obs.items():
-            datarate = ue_features["datarate"][0]
-            utility = ue_features["utility"][0]
+        # 保存用户-基站数据速率
+        user_bs_rates = [
+            {"ue_id": ue.ue_id, "bs_id": bs.bs_id, "data_rate": round(float(rate), 2)}
+            for (bs, ue), rate in self.bs2ue_dataRates.items()
+        ]
+        data_rate_file = os.path.join(
+            "..", "collectData", "DataRate", f"data_rates_{epoch_number}_{curr_step}.json"
+        )
+        os.makedirs(os.path.dirname(data_rate_file), exist_ok=True)
+        with open(data_rate_file, "w") as f:
+            json.dump(user_bs_rates, f, indent=4)
+        # print(f"用户-基站数据速率已保存: {data_rate_file}")
 
-            # 初始化每个用户的列表
-            if ue_id not in self.all_step_datarates or not isinstance(self.all_step_datarates[ue_id], list):
-                self.all_step_datarates[ue_id] = []
-            if ue_id not in self.all_step_utilities or not isinstance(self.all_step_utilities[ue_id], list):
-                self.all_step_utilities[ue_id] = []
+        # 保存用户效用值 QoE
+        user_qoe = [
+            {"ue_id": ue.ue_id, "qoe": round(self.ue_utilities.get(ue, 0.0), 2)}
+            for ue in self.userDict.values()
+        ]
+        user_qoe_file = os.path.join(
+            "..", "collectData", "UserQoE", f"user_qoe_{epoch_number}_{curr_step}.json"
+        )
+        os.makedirs(os.path.dirname(user_qoe_file), exist_ok=True)
+        with open(user_qoe_file, "w") as f:
+            json.dump(user_qoe, f, indent=4)
+        # print(f"用户效用值已保存: {user_qoe_file}")
 
-            # 追加当前时间步的数据速率和效用值到对应的用户列表中
-            self.all_step_datarates[ue_id].append(datarate)
-            self.all_step_utilities[ue_id].append(utility)
-
-    # 在数据收集完成后调用此方法来查看数据的维度并保存为CSV
-    def save_all_step_data(self, idx):
-        # 检查数据是否为空
-        if not self.all_step_datarates or not self.all_step_utilities:
-            print("数据记录为空，无法保存。")
+    def save_epoch_data(self, epoch_number):
+        # 检查是否有用户数据速率
+        if not self.users_dataRateList:
+            print(f"警告：在第 {epoch_number} 轮中没有用户数据速率，跳过保存。")
             return
 
-        try:
-            # 数据速率记录
-            max_datarates_steps = max(len(datarates) for datarates in self.all_step_datarates.values())
-            # print(f"all_step_datarates: {len(self.all_step_datarates)} rows, {max_datarates_steps} columns")
+        # 保存数据速率
+        datarate_file = os.path.join(
+            "..", "collectData2", "DataRate", f"datarates_{epoch_number}.csv"
+        )
+        os.makedirs(os.path.dirname(datarate_file), exist_ok=True)
+        datarates = [
+            {"User ID": ue_id, "Data Rates": rates}
+            for ue_id, rates in self.users_dataRateList.items()
+        ]
+        datarate_df = pd.DataFrame(datarates)
+        datarate_df.to_csv(datarate_file, index=False)
+        # print(f"数据速率保存成功：{datarate_file}")
 
-            datarate_records = {"UE ID": list(self.all_step_datarates.keys())}
-            for step in range(max_datarates_steps):
-                datarate_records[f"Step {step + 1}"] = [
-                    datarates[step] if step < len(datarates) else None
-                    for datarates in self.all_step_datarates.values()
-                ]
-            data_rate_df = pd.DataFrame(datarate_records)
+        # 检查是否有用户运动轨迹
+        if not self.users_trajectoryList:
+            print(f"警告：在第 {epoch_number} 轮中没有用户运动轨迹，跳过保存。")
+            return
 
-            # 保存到指定文件夹
-            data_rate_file = os.path.join(
-                "/Users/yangpeilin/NUS CE/project/mobile-env-gan/mobile_env/collectData/UserDataRate",
-                f"dataRates_{idx}.csv")
-            data_rate_df.to_csv(data_rate_file, index=False)
+        # 保存用户运动轨迹
+        trajectory_file = os.path.join(
+            "..", "collectData2", "UserEquipmentPosition", f"user_positions_{epoch_number}.csv"
+        )
+        os.makedirs(os.path.dirname(trajectory_file), exist_ok=True)
+        trajectories = [
+            {"User ID": ue_id, "Trajectory": positions}
+            for ue_id, positions in self.users_trajectoryList.items()
+        ]
+        trajectory_df = pd.DataFrame(trajectories)
+        trajectory_df.to_csv(trajectory_file, index=False)
+        # print(f"用户轨迹保存成功：{trajectory_file}")
 
-            # 效用值记录
-            max_utilities_steps = max(len(utilities) for utilities in self.all_step_utilities.values())
-            # print(f"all_step_utilities: {len(self.all_step_utilities)} rows, {max_utilities_steps} columns")
+        # 检查是否有用户效用值 QoE
+        if not self.userQoEList:
+            print(f"警告：在第 {epoch_number} 轮中没有用户效用值，跳过保存。")
+            return
 
-            utility_records = {"UE ID": list(self.all_step_utilities.keys())}
-            for step in range(max_utilities_steps):
-                utility_records[f"Step {step + 1}"] = [
-                    utilities[step] if step < len(utilities) else None
-                    for utilities in self.all_step_utilities.values()
-                ]
-            utility_df = pd.DataFrame(utility_records)
-
-            # 保存到指定文件夹
-            utility_file = os.path.join("/Users/yangpeilin/NUS CE/project/mobile-env-gan/mobile_env/collectData/UserQoE",
-                                        f"all_step_utilities_{idx}.csv")
-            utility_df.to_csv(utility_file, index=False)
-            # print(f"数据保存完成：{data_rate_file} 和 {utility_file}")
-
-        except Exception as e:
-            print(f"保存数据失败: {e}")
+        # 保存用户效用值 QoE
+        qoe_file = os.path.join(
+            "..", "collectData2", "UserQoE", f"user_qoe_{epoch_number}.csv"
+        )
+        os.makedirs(os.path.dirname(qoe_file), exist_ok=True)
+        qoes = [
+            {"User ID": ue_id, "QoE": qoes}
+            for ue_id, qoes in self.userQoEList.items()
+        ]
+        qoe_df = pd.DataFrame(qoes)
+        qoe_df.to_csv(qoe_file, index=False)
+        # print(f"用户效用值保存成功：{qoe_file}")
 
     # 判断当前时间是否已经达到了最小的结束时间
     @property
@@ -454,153 +409,55 @@ class MComCore:
         return self.time >= min(self.EP_MAX_TIME, self.max_departure)
 
     # 遍历基站和用户设备之间的连接，聚合每个用户设备的总数据速率
-    def macro_datarates(self, bs2ue_dataRates):
-        ue_datarates = Counter()
-        connected_ues = set()
-
+    # self.macro: 用来存储每个用户设备的总数据速率
+    def user_total_datarates(self, bs2ue_dataRates):
+        ue_dataRates = Counter()
         for (bs, ue), datarate in bs2ue_dataRates.items():
-            # 检查当前用户是否已经连接到另一个基站
-            assert ue not in connected_ues, f"用户设备 {ue} 多次连接，当前基站：{bs}"
-            ue_datarates.update({ue: datarate})
-            connected_ues.add(ue)
+            ue_dataRates.update({ue: datarate})
 
-        return ue_datarates
+        return ue_dataRates
 
     # 计算每个用户设备最终能接收到的下行数据速率
-    def station_allocation(self, bs) -> Dict:
-        # 获取与基站 bs 建立连接的用户集合
+    def allocateDataRate2User(self, bs) -> Dict:
         if bs in self.bs2ue_connections:
             conns = self.bs2ue_connections[bs]
         else:
             conns = set()  # 如果基站不在 connections 中，使用空集合
 
-        # 计算每个用户设备的SNR和最大数据速率
-        snrs = [self.channel.snr(bs, ue) for ue in conns]
-
-        # 计算每个用户设备的最大数据速率
-        # zip(snrs, conns) = > [(snrs[0], conns[0]), (snrs[1], conns[1]), (snrs[2], conns[2]), ...]
-        # max_allocation = [
-        #     self.channel.datarate(bs, ue1, 10.5),
-        #     self.channel.datarate(bs, ue2, 8.2),
-        #     self.channel.datarate(bs, ue3, 5.6)
-        # ]
+        snrs = [self.channelModel.calculateSNR(bs, ue) for ue in conns]
+        # max_allocation：一个列表，其中每个元素是基站与其连接用户之间的理论最大数据速率
         max_allocation = [
-            self.channel.datarate(bs, ue, snr) for snr, ue in zip(snrs, conns)
+            self.channelModel.datarate(bs, ue, snr) for snr, ue in zip(snrs, conns)
         ]
+        rates = self.schedulerModel.share(bs, max_allocation)
 
-        # rates是一个列表，存储了每个用户设备最终分配到的下行数据速率
-        rates = self.scheduler.share(bs, max_allocation)
-
-        # 返回每个用户设备与基站的最终数据速率
-        return {(bs, ue): rate for ue, rate in zip(conns, rates)}
+        # 对最终的速率进行格式化，保留两位小数
+        return {(bs, ue): round(rate, 2) for ue, rate in zip(conns, rates)}
 
     # 计算每个基站（BaseStation）的平均效用值，并返回一个字典，表示各个基站的效用情况
-    # {
-    #     BaseStation1: UtilityValue1,
-    #     BaseStation2: UtilityValue2,
-    #     ...
-    # }
-    def station_utilities(self) -> Dict[BaseStation, UserEquipment]:
-        idle = self.utility.scale(self.utility.lower)
-
-        # 计算每个基站的平均效用值
+    def allStationUtilities(self) -> Dict[BaseStation, UserEquipment]:
+        idle = self.utilityModel.scaleUtility(self.utilityModel.lower)
         util = {
-            bs: sum(self.utilities[ue] for ue in self.bs2ue_connections[bs]) / len(self.bs2ue_connections[bs])
+            bs: sum(self.ue_utilities[ue] for ue in self.bs2ue_connections[bs]) / len(self.bs2ue_connections[bs])
             if self.bs2ue_connections[bs]
             else idle
-            for bs in self.stations.values()
+            for bs in self.stationDict.values()
         }
 
         return util
 
     # 为每个基站计算其等值线并将这些结果存储在一个字典中
     def bs_isolines(self, drate: float) -> Dict:
-        # 初始化一个空字典，用于存储每个基站的等值线数据
         isolines = {}
-
-        # ["ue"]提取用户设备的默认配置
         config = self.default_config()["ue"]
 
         # 计算每个基站的等值线
-        for bs in self.stations.values():
-            isolines[bs] = self.channel.isoline(
+        for bs in self.stationDict.values():
+            isolines[bs] = self.channelModel.isoline(
                 bs, config, (self.width, self.height), drate
             )
 
         return isolines
-
-    # 生成用户设备（UE）在仿真环境中的特征观测值 并返回一个包含所有用户设备的特征字典
-    # 包括连接状态、信噪比（SNR）、效用值（utility）、基站广播信息和连接用户设备的数量
-    def features(self) -> Dict[int, Dict[str, np.ndarray]]:
-        stations = sorted([bs for bs in self.stations.values()], key=lambda bs: bs.bs_id)
-
-        # 调用station_utilities()方法，计算并返回每个基站的平均效用值
-        bs_utilities = self.station_utilities()
-
-        # 这是一个内部函数，用于为一个用户设备ue生成其观测特征
-        def ue_features(ue: UserEquipment):
-            connections = [bs for bs in stations if ue in self.bs2ue_connections[bs]]
-
-            # 当前情况每个用户只可能连接最近的基站 所以加上这个assert
-            assert len(connections) <= 1
-
-            onehot = np.zeros(self.NUM_STATIONS, dtype=np.float32)
-            onehot[[bs.bs_id for bs in connections]] = 1
-
-            # 计算用户设备与每个基站之间的信噪比(SNR)，并对这些SNR值进行归一化处理，使其值在[0, 1]范围内
-            snrs = [self.channel.snr(bs, ue) for bs in stations]
-            maxsnr = max(snrs)
-            snrs = np.asarray([snr / maxsnr for snr in snrs], dtype=np.float32)
-
-            # 获取用户设备 ue 的效用值 (Utility)，并将该值转换为一个 NumPy 数组
-            # 如果该用户设备的效用值未定义，则使用缩放后的默认效用值
-            utility = (
-                self.utilities[ue]
-                if ue in self.utilities
-                else self.utility.scale(self.utility.lower)
-            )
-            utility = np.asarray([utility], dtype=np.float32)
-
-            # 这段代码的主要功能是构建用户设备与所有基站之间的广播效用值(Utility Broadcast)，
-            # 用于描述用户设备在每个基站上的潜在效用值。如果用户设备未连接到某个基站，则该基站的效用值设置为默认效用值(idle)
-            idle = self.utility.scale(self.utility.lower)
-            util_bcast = {
-                bs: util if self.check_connectivity(bs, ue) else idle
-                for bs, util in bs_utilities.items()
-            }
-            util_bcast = np.asarray([util_bcast[bs] for bs in stations], dtype=np.float32)
-
-            # 计算基站连接的用户设备数量
-            def num_connected(bs):
-                if self.check_connectivity(bs, ue):
-                    return len(self.bs2ue_connections[bs])
-                return 0.0
-
-            # 遍历所有基站，计算每个基站连接的用户设备数量
-            stations_connected = [num_connected(bs) for bs in stations]
-
-            # 表示每个基站连接的用户设备数量相对于总连接数的比例
-            total = max(1, sum(stations_connected))
-            stations_connected = np.asarray(
-                [num / total for num in stations_connected], dtype=np.float32
-            )
-
-            # 获取用户设备 ue 的数据速率 (Data Rate)，并将其 转换为 NumPy 数组
-            datarate = np.asarray([self.macro.get(ue, 0.0)], dtype=np.float32)
-
-            return {
-                "connections": onehot,
-                "snrs": snrs,
-                "utility": utility,
-                "bcast": util_bcast,
-                "stations_connected": stations_connected,
-                "datarate": datarate,  # 添加数据速率到特征中
-            }
-
-        # obs字典现在包含了所有用户设备的特征，无论它们是活跃还是非活跃
-        obs = {ue.ue_id: ue_features(ue) for ue in self.users.values()}
-
-        return obs
 
     # 计算基站等值线。
     # 设置 matplotlib 图表布局。
@@ -614,12 +471,12 @@ class MComCore:
             return
 
         # 计算基站的连接范围等值线，即用户设备可以连接到基站的区域边界（基于信号强度）
-        if self.conn_isolines is None:
-            self.conn_isolines = self.bs_isolines(0.0)
+        if self.conn_iso_lines is None:
+            self.conn_iso_lines = self.bs_isolines(0.0)
 
         # 计算基站的1MB / s数据速率等值线，即用户设备可以接收到至少1MB / s数据速率的区域边界
-        if self.mb_isolines is None:
-            self.mb_isolines = self.bs_isolines(1.0)
+        if self.mb_iso_lines is None:
+            self.mb_iso_lines = self.bs_isolines(1.0)
 
         # 设置matplotlib图表的布局
         fig = plt.figure()
@@ -661,7 +518,7 @@ class MComCore:
             # 渲染用户设备与基站的连接状态图
             self.render_ues_connected(conn_ax)
 
-        # 意味着对齐这两个子图的 y 轴标签
+        # # 意味着对齐这两个子图的 y 轴标签
         fig.align_ylabels((qoe_ax, conn_ax))
         canvas = FigureCanvas(fig)
         canvas.draw()
@@ -720,11 +577,11 @@ class MComCore:
         # colormap：使用matplotlib的颜色映射（RdYlGn），用于将效用值（QoE）映射为不同颜色
         colormap = cm.get_cmap("RdYlGn")
         # unorm：定义一个归一化对象，用于将效用值（self.utility.lower到self.utility.upper）映射为颜色
-        unorm = plt.Normalize(self.utility.lower, self.utility.upper)
+        unorm = plt.Normalize(self.utilityModel.lower, self.utilityModel.upper)
 
         # 绘制用户设备（UE）
-        for ue, utility in self.utilities.items():
-            utility = self.utility.unscale(utility)
+        for ue, utility in self.ue_utilities.items():
+            utility = self.utilityModel.unscaleUtility(utility)
             color = colormap(unorm(utility))
 
             ax.scatter(
@@ -739,7 +596,7 @@ class MComCore:
             ax.annotate(ue.ue_id, xy=(ue.point.x, ue.point.y), ha="center", va="center")
 
         # 遍历基站：遍历所有基站，并为每个基站绘制一个图标
-        for bs in self.stations.values():
+        for bs in self.stationDict.values():
             ax.plot(
                 bs.point.x,
                 bs.point.y,
@@ -765,19 +622,19 @@ class MComCore:
             # print("*self.conn_isolines[bs]: ", *self.conn_isolines[bs])
             # print(f"bs: {bs}, type(bs): {type(bs)}")
 
-            ax.scatter(*self.conn_isolines[bs], color="gray", s=3)
+            ax.scatter(*self.conn_iso_lines[bs], color="gray", s=3)
             # 在图表上绘制基站的1MB / s数据速率等值线
-            ax.scatter(*self.mb_isolines[bs], color="black", s=3)
+            ax.scatter(*self.mb_iso_lines[bs], color="black", s=3)
 
         # 绘制基站和用户设备之间的连接
-        for bs in self.stations.values():
+        for bs in self.stationDict.values():
             for ue in self.bs2ue_connections[bs]:
 
                 # share = self.bs2ue_dataRates[(bs, ue)] / self.macro[ue]
-                share = self.bs2ue_dataRates.get((bs, ue), 0.0) / self.macro.get(ue, 1.0)
+                share = self.bs2ue_dataRates.get((bs, ue), 0.0) / self.allUserDataRates.get(ue, 1.0)
 
                 # 根据贡献比例，使用颜色映射为该连接分配颜色
-                share = share * self.utility.unscale(self.utilities[ue])
+                share = share * self.utilityModel.unscaleUtility(self.ue_utilities[ue])
                 color = colormap(unorm(share))
 
                 # ax.plot()：绘制基站和用户设备之间的连线，线条颜色表示该连接对用户设备效用的贡献
@@ -874,7 +731,7 @@ class MComCore:
         ax.set_ylabel("Avg. Utility")
         # 设置 X 轴和 Y 轴的范围
         ax.set_xlim([0.0, self.EP_MAX_TIME])
-        ax.set_ylim([self.utility.lower, self.utility.upper])
+        ax.set_ylim([self.utilityModel.lower, self.utilityModel.upper])
 
     # 绘制仿真过程中 连接的用户设备数量 随时间变化的曲线
     def render_ues_connected(self, ax) -> None:
@@ -886,9 +743,10 @@ class MComCore:
         ax.set_xlabel("Time")
         ax.set_ylabel("#Conn. UEs")
         ax.set_xlim([0.0, self.EP_MAX_TIME])
-        ax.set_ylim([0.0, len(self.users)])
+        ax.set_ylim([0.0, len(self.userDict)])
 
     # 关闭仿真环境，同时终止其可视化的显示
+
     def close(self) -> None:
         pygame.quit()
         self.window = None

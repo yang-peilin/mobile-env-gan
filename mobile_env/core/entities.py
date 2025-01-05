@@ -46,8 +46,8 @@ class UserEquipment:
 
         self.x: float = None
         self.y: float = None
-        self.stime: int = None
-        self.extime: int = None
+        self.startTime: int = None
+        self.exitTime: int = None
 
     @property
     def point(self):

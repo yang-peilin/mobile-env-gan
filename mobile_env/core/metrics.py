@@ -16,13 +16,13 @@ def number_connected(sim):
 
 # 计算所有连接的用户设备的平均数据速率
 def mean_datarate(sim):
-    if not sim.macro:
+    if not sim.allUserDataRates:
         return 0.0
-    return np.mean(list(sim.macro.values()))
+    return np.mean(list(sim.allUserDataRates.values()))
 
 
 # 计算所有用户设备的平均效用值
 def mean_utility(sim):
-    if not sim.utilities:
-        return sim.utility.lower
-    return np.mean(list(sim.utilities.values()))
+    if not sim.ue_utilities:
+        return sim.utilityModel.lower
+    return np.mean(list(sim.ue_utilities.values()))
